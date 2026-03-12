@@ -42,6 +42,9 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
+# Claude için sadece requests yeterli (built-in)
+import urllib.request
+
 # ─────────────────────────────────────────────
 # MOBİL-ÖNCELİKLİ CSS
 # ─────────────────────────────────────────────
@@ -526,14 +529,41 @@ Yanıtını aşağıdaki JSON formatında ver, başka hiçbir metin ekleme:
 """
 
 
+def claude_http_ile_cagir(sistem_promptu: str, kullanici_mesaji: str, api_key: str) -> str:
+    """Anthropic Claude API — saf urllib, ekstra kütüphane gerektirmez."""
+    import urllib.request as _ur
+    payload = json.dumps({
+        "model": "claude-haiku-4-5-20251001",
+        "max_tokens": 1200,
+        "system": sistem_promptu,
+        "messages": [{"role": "user", "content": kullanici_mesaji}],
+    }).encode("utf-8")
+    req = _ur.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        },
+        method="POST",
+    )
+    with _ur.urlopen(req, timeout=60) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    raw = data["content"][0]["text"]
+    return re.sub(r"```json\s*|\s*```", "", raw).strip()
+
+
 def llm_ile_uret(ham_veri: str, pdr: dict, profil: dict | None,
                   api_tipi: str, api_key: str) -> dict:
     """LLM API'ye istek gönder, JSON yanıtı döndür."""
-
     sistem_promptu = dinamik_sistem_promptu_olustur(pdr, profil)
     kullanici_mesaji = f"Ham Emlak Verisi:\n{ham_veri}"
 
-    if api_tipi == "openai" and OPENAI_AVAILABLE and api_key:
+    if api_tipi == "claude" and api_key:
+        raw = claude_http_ile_cagir(sistem_promptu, kullanici_mesaji, api_key)
+
+    elif api_tipi == "openai" and OPENAI_AVAILABLE and api_key:
         client = openai.OpenAI(api_key=api_key)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -555,15 +585,12 @@ def llm_ile_uret(ham_veri: str, pdr: dict, profil: dict | None,
             system_instruction=sistem_promptu,
         )
         response = model.generate_content(kullanici_mesaji)
-        raw = response.text
-        # JSON bloğunu temizle
-        raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
+        raw = re.sub(r"```json\s*|\s*```", "", response.text).strip()
 
     else:
         raise ValueError("Geçerli bir API türü ve anahtarı sağlanmalı.")
 
     return json.loads(raw)
-
 
 def demo_metin_uret(ham_veri: str, pdr: dict) -> dict:
     """API yokken gerçekçi demo metinler üret."""
@@ -686,13 +713,13 @@ def main():
 
         api_tipi = st.selectbox(
             "LLM Sağlayıcı",
-            ["demo (API yok)", "openai", "gemini"],
+            ["demo (API yok)", "claude", "gemini", "openai"],
             help="Demo modda gerçekçi örnek metin üretilir."
         )
 
         api_key = ""
         if api_tipi != "demo (API yok)":
-            env_key = os.getenv("OPENAI_API_KEY" if api_tipi == "openai" else "GEMINI_API_KEY", "")
+            env_key = os.getenv("ANTHROPIC_API_KEY" if api_tipi == "claude" else ("OPENAI_API_KEY" if api_tipi == "openai" else "GEMINI_API_KEY"), "")
             api_key = st.text_input(
                 "API Anahtarı",
                 value=env_key,
@@ -753,36 +780,126 @@ def main():
         key="ham_veri_input",
     )
 
-    # Sesli Giriş Simülasyonu (opsiyonel kütüphane)
-    try:
-        from streamlit_mic_recorder import mic_recorder
-        with st.expander("🎤 Sesli Giriş (Mikrofon)", expanded=False):
-            st.caption("Mikrofon butonuna basın, konuşun, durdurun → metin otomatik gelir.")
-            audio = mic_recorder(start_prompt="🔴 Kayıt Başlat", stop_prompt="⏹ Durdur",
-                                  key="ses_kayit", just_once=True)
-            if audio:
-                st.audio(audio['bytes'], format="audio/wav")
-                st.info("🎙️ Ses kaydedildi! Şu an için metni manuel yapıştırın. "
-                        "Whisper entegrasyonu için OPENAI_API_KEY gereklidir.")
-                # Whisper entegrasyonu (OpenAI varsa)
-                if OPENAI_AVAILABLE and api_key and api_tipi == "openai":
-                    try:
-                        with st.spinner("Ses → Metne çevriliyor..."):
-                            client = openai.OpenAI(api_key=api_key)
-                            import io
-                            audio_file = io.BytesIO(audio['bytes'])
-                            audio_file.name = "recording.wav"
-                            transcript = client.audio.transcriptions.create(
-                                model="whisper-1", file=audio_file, language="tr"
-                            )
-                            ham_veri = transcript.text
-                            st.success(f"✅ Transkript: {ham_veri}")
-                    except Exception as e:
-                        st.warning(f"Transkript hatası: {e}")
-    except ImportError:
-        with st.expander("🎤 Sesli Giriş (Kurulum Gerekli)", expanded=False):
-            st.code("pip install streamlit-mic-recorder", language="bash")
-            st.caption("Kurulum sonrası uygulama yeniden başlatın.")
+    # ── SESLİ GİRİŞ (Web Speech API — kurulum gerektirmez, Chrome'da çalışır) ──
+    with st.expander("🎤 Sesli Giriş — Mikrofona Konuş", expanded=False):
+        st.caption("🟢 Chrome / Edge tarayıcısında çalışır. Butona bas, Türkçe konuş, metni kopyala.")
+
+        ses_html = """
+<div style="font-family:Inter,sans-serif; padding:12px; background:#0f172a;
+     border-radius:14px; border:1px solid rgba(99,179,237,0.2);">
+
+  <div id="status" style="color:#94a3b8; font-size:13px; margin-bottom:12px; text-align:center;">
+    🎤 Hazır — butona bas ve konuş
+  </div>
+
+  <textarea id="sesMetin" rows="4" placeholder="Konuşunca burada görünür..."
+    style="width:100%; background:#1e293b; color:#e2e8f0; border:1px solid rgba(99,179,237,0.2);
+           border-radius:10px; padding:12px; font-size:14px; resize:none; box-sizing:border-box;
+           margin-bottom:10px;"></textarea>
+
+  <div style="display:flex; gap:8px;">
+    <button id="baslatBtn" onclick="baslatDinleme()" style="
+      flex:1; padding:14px; background:linear-gradient(135deg,#dc2626,#b91c1c);
+      color:white; border:none; border-radius:10px; font-size:15px;
+      font-weight:700; cursor:pointer;">
+      🔴 Konuşmaya Başla
+    </button>
+    <button onclick="temizle()" style="
+      padding:14px 18px; background:#1e293b; color:#94a3b8;
+      border:1px solid rgba(99,179,237,0.2); border-radius:10px;
+      font-size:13px; cursor:pointer;">
+      🗑️
+    </button>
+  </div>
+
+  <button onclick="kopyala()" style="
+    width:100%; margin-top:8px; padding:12px;
+    background:linear-gradient(135deg,#065f46,#047857);
+    color:white; border:none; border-radius:10px;
+    font-size:14px; font-weight:700; cursor:pointer;">
+    📋 Metni Kopyala → Ham Veri Alanına Yapıştır
+  </button>
+
+  <div id="kopyaMesaj" style="display:none; color:#34d399; text-align:center;
+       font-size:13px; margin-top:8px;">✅ Kopyalandı! Ham veri alanına yapıştır (Ctrl+V)</div>
+</div>
+
+<script>
+let recognition = null;
+let dinliyor = false;
+
+function baslatDinleme() {
+  if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
+    document.getElementById('status').innerHTML =
+      '❌ Tarayıcınız desteklemiyor. Chrome veya Edge kullanın.';
+    document.getElementById('status').style.color = '#f87171';
+    return;
+  }
+
+  if (dinliyor) {
+    recognition.stop();
+    return;
+  }
+
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'tr-TR';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  recognition.onstart = () => {
+    dinliyor = true;
+    document.getElementById('baslatBtn').textContent = '⏹ Durdur';
+    document.getElementById('baslatBtn').style.background = 'linear-gradient(135deg,#1d4ed8,#1e40af)';
+    document.getElementById('status').innerHTML = '🔴 Dinleniyor... Konuşun';
+    document.getElementById('status').style.color = '#34d399';
+  };
+
+  recognition.onresult = (e) => {
+    let metin = '';
+    for (let i = 0; i < e.results.length; i++) {
+      metin += e.results[i][0].transcript;
+    }
+    document.getElementById('sesMetin').value = metin;
+  };
+
+  recognition.onend = () => {
+    dinliyor = false;
+    document.getElementById('baslatBtn').textContent = '🔴 Konuşmaya Başla';
+    document.getElementById('baslatBtn').style.background = 'linear-gradient(135deg,#dc2626,#b91c1c)';
+    document.getElementById('status').innerHTML = '✅ Tamamlandı — metni kopyalayın';
+    document.getElementById('status').style.color = '#63b3ed';
+  };
+
+  recognition.onerror = (e) => {
+    document.getElementById('status').innerHTML = '❌ Hata: ' + e.error + ' — tekrar deneyin';
+    document.getElementById('status').style.color = '#f87171';
+    dinliyor = false;
+  };
+
+  recognition.start();
+}
+
+function temizle() {
+  document.getElementById('sesMetin').value = '';
+  document.getElementById('status').innerHTML = '🎤 Hazır — butona bas ve konuş';
+  document.getElementById('status').style.color = '#94a3b8';
+}
+
+function kopyala() {
+  const metin = document.getElementById('sesMetin').value;
+  if (!metin) return;
+  navigator.clipboard.writeText(metin).then(() => {
+    document.getElementById('kopyaMesaj').style.display = 'block';
+    setTimeout(() => {
+      document.getElementById('kopyaMesaj').style.display = 'none';
+    }, 3000);
+  });
+}
+</script>
+"""
+        st.components.v1.html(ses_html, height=320)
+        st.info("💡 Konuştuktan sonra 'Metni Kopyala' → yukarıdaki Ham Veri kutusuna yapıştır (Ctrl+V / uzun bas)")
 
     st.markdown("<br>", unsafe_allow_html=True)
 
