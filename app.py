@@ -42,9 +42,6 @@ try:
 except ImportError:
     GEMINI_AVAILABLE = False
 
-# Claude için sadece requests yeterli (built-in)
-import urllib.request
-
 # ─────────────────────────────────────────────
 # MOBİL-ÖNCELİKLİ CSS
 # ─────────────────────────────────────────────
@@ -529,41 +526,14 @@ Yanıtını aşağıdaki JSON formatında ver, başka hiçbir metin ekleme:
 """
 
 
-def claude_http_ile_cagir(sistem_promptu: str, kullanici_mesaji: str, api_key: str) -> str:
-    """Anthropic Claude API — saf urllib, ekstra kütüphane gerektirmez."""
-    import urllib.request as _ur
-    payload = json.dumps({
-        "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 1200,
-        "system": sistem_promptu,
-        "messages": [{"role": "user", "content": kullanici_mesaji}],
-    }).encode("utf-8")
-    req = _ur.Request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-        },
-        method="POST",
-    )
-    with _ur.urlopen(req, timeout=60) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    raw = data["content"][0]["text"]
-    return re.sub(r"```json\s*|\s*```", "", raw).strip()
-
-
 def llm_ile_uret(ham_veri: str, pdr: dict, profil: dict | None,
                   api_tipi: str, api_key: str) -> dict:
     """LLM API'ye istek gönder, JSON yanıtı döndür."""
+
     sistem_promptu = dinamik_sistem_promptu_olustur(pdr, profil)
     kullanici_mesaji = f"Ham Emlak Verisi:\n{ham_veri}"
 
-    if api_tipi == "claude" and api_key:
-        raw = claude_http_ile_cagir(sistem_promptu, kullanici_mesaji, api_key)
-
-    elif api_tipi == "openai" and OPENAI_AVAILABLE and api_key:
+    if api_tipi == "openai" and OPENAI_AVAILABLE and api_key:
         client = openai.OpenAI(api_key=api_key)
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -585,12 +555,15 @@ def llm_ile_uret(ham_veri: str, pdr: dict, profil: dict | None,
             system_instruction=sistem_promptu,
         )
         response = model.generate_content(kullanici_mesaji)
-        raw = re.sub(r"```json\s*|\s*```", "", response.text).strip()
+        raw = response.text
+        # JSON bloğunu temizle
+        raw = re.sub(r"```json\s*|\s*```", "", raw).strip()
 
     else:
         raise ValueError("Geçerli bir API türü ve anahtarı sağlanmalı.")
 
     return json.loads(raw)
+
 
 def demo_metin_uret(ham_veri: str, pdr: dict) -> dict:
     """API yokken gerçekçi demo metinler üret."""
@@ -713,13 +686,13 @@ def main():
 
         api_tipi = st.selectbox(
             "LLM Sağlayıcı",
-            ["demo (API yok)", "claude", "gemini", "openai"],
+            ["demo (API yok)", "openai", "gemini"],
             help="Demo modda gerçekçi örnek metin üretilir."
         )
 
         api_key = ""
         if api_tipi != "demo (API yok)":
-            env_key = os.getenv("ANTHROPIC_API_KEY" if api_tipi == "claude" else ("OPENAI_API_KEY" if api_tipi == "openai" else "GEMINI_API_KEY"), "")
+            env_key = os.getenv("OPENAI_API_KEY" if api_tipi == "openai" else "GEMINI_API_KEY", "")
             api_key = st.text_input(
                 "API Anahtarı",
                 value=env_key,
